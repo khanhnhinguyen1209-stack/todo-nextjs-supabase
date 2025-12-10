@@ -1,7 +1,9 @@
 "use client";
 
-export default function TaskItem({ task, onToggle, onEdit, onDelete }) {
-  const isOverdue = new Date(task.deadline) < new Date() && task.status !== "done";
+export default function TaskItem({ task, onToggle = () => {}, onEdit = () => {}, onDelete = () => {} }) {
+  if (!task) return null;
+  
+  const isOverdue = task.deadline && new Date(task.deadline) < new Date() && task.status !== "done"; // Kiểm tra quá hạn
 
   return (
     <div className={`p-4 rounded-xl border-2 ${task.status === "done" ? "bg-gray-50" : "bg-white"} border-gray-200`}>
