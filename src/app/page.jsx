@@ -1,9 +1,15 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { supabase } from "../lib/supabaseClient"; 
-import { Auth } from "@supabase/auth-ui-react";
-import { ThemeSupa } from "@supabase/auth-ui-shared";
+import { 
+  useUser, 
+  SignedIn, 
+  SignedOut, 
+  SignInButton,
+  SignUpButton,
+  UserButton,
+  ClerkLoaded
+} from "@clerk/nextjs";
 
 import TaskList from "./components/TaskList";
 import AddTaskForm from "./components/AddTaskForm";
@@ -11,264 +17,273 @@ import EditTaskModal from "./components/EditTaskModal";
 import LoadingOverlay from "./components/LoadingOverlay";
 
 export default function Home() {
-  // --- PHẦN 1: LOGIC XỬ LÝ DỮ LIỆU (SUPABASE) ---
-  const [session, setSession] = useState(null);
+  const { user, isLoaded, isSignedIn } = useUser();
+
+  // Tên hiển thị
+  const displayName = useMemo(() => {
+    if (!user) return "Người dùng";
+    
+    // Ưu tiên các loại tên
+    if (user.fullName) return user.fullName;
+    if (user.firstName) return user.firstName;
+    if (user.username) return user.username;
+    if (user.primaryEmailAddress?.emailAddress) {
+      return user.primaryEmailAddress.emailAddress;
+    }
+    if (user.emailAddresses?.[0]?.emailAddress) {
+      return user.emailAddresses[0].emailAddress;
+    }
+    
+    return "Người dùng";
+  }, [user]);
+
   const [allTasks, setAllTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editingTask, setEditingTask] = useState(null);
 
-  // State bộ lọc và sắp xếp
+  // Bộ lọc
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
   const [sortBy, setSortBy] = useState("deadline-asc");
 
-  // 1. Kiểm tra trạng thái đăng nhập
+  // Reset loading khi auth state thay đổi
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      if (session) fetchTasks();
-      else setLoading(false);
-    });
+    if (isLoaded) {
+      setTimeout(() => setLoading(false), 500);
+    }
+  }, [isLoaded, isSignedIn]);
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (session) fetchTasks();
-      else setAllTasks([]);
-    });
+  // Load tasks từ localStorage khi user đã đăng nhập
+  useEffect(() => {
+    if (user && isSignedIn) {
+      const savedTasks = localStorage.getItem(`tasks_${user.id}`);
+      if (savedTasks) {
+        try {
+          setAllTasks(JSON.parse(savedTasks));
+        } catch (error) {
+          console.error("Error parsing tasks:", error);
+          setAllTasks([]);
+        }
+      }
+    }
+  }, [user, isSignedIn]);
 
-    return () => subscription.unsubscribe();
-  }, []);
-
-  // 2. Tải danh sách công việc từ Cloud
-  const fetchTasks = async () => {
-    setLoading(true);
-    // Lấy task và sắp xếp theo ngày tạo mới nhất
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('*')
-      .order('created_at', { ascending: false });
-      
-    if (!error && data) setAllTasks(data);
-    setLoading(false);
-  };
-
-  // 3. Thêm công việc mới
+  // ADD TASK
   const addTask = async (taskData) => {
+    if (!user) return;
+    
     const newTask = {
+      id: Date.now().toString(),
       text: taskData.text,
       deadline: taskData.deadline,
-      status: 'pending',
-      user_id: session.user.id // Gán task cho người dùng hiện tại
+      status: "pending",
+      user_id: user.id,
+      created_at: new Date().toISOString(),
     };
+
+    const updatedTasks = [newTask, ...allTasks];
+    setAllTasks(updatedTasks);
     
-    const { data, error } = await supabase.from('tasks').insert([newTask]).select();
-    
-    if (!error && data) {
-      setAllTasks(prev => [data[0], ...prev]);
-    }
+    localStorage.setItem(`tasks_${user.id}`, JSON.stringify(updatedTasks));
   };
 
-  // 4. Cập nhật nội dung công việc
+  // UPDATE TASK
   const updateTask = async (updatedTask) => {
-    const { error } = await supabase
-      .from('tasks')
-      .update({ 
-        text: updatedTask.text, 
-        deadline: updatedTask.deadline,
-        status: updatedTask.status,
-      })
-      .eq('id', updatedTask.id);
-
-    if (!error) {
-      setAllTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
+    const updatedTasks = allTasks.map((t) =>
+      t.id === updatedTask.id ? updatedTask : t
+    );
+    setAllTasks(updatedTasks);
+    
+    if (user) {
+      localStorage.setItem(`tasks_${user.id}`, JSON.stringify(updatedTasks));
     }
   };
 
-  // 5. Xóa công việc
+  // DELETE TASK
   const deleteTask = async (taskId) => {
-    const { error } = await supabase.from('tasks').delete().eq('id', taskId);
-    if (!error) {
-      setAllTasks(prev => prev.filter(t => t.id !== taskId));
+    const updatedTasks = allTasks.filter((t) => t.id !== taskId);
+    setAllTasks(updatedTasks);
+    
+    if (user) {
+      localStorage.setItem(`tasks_${user.id}`, JSON.stringify(updatedTasks));
     }
   };
 
-  // 6. Đổi trạng thái (Hoàn thành / Chưa hoàn thành)
+  // TOGGLE TASK
   const toggleTask = async (task) => {
     const newStatus = task.status === "done" ? "pending" : "done";
-    const { error } = await supabase
-      .from('tasks')
-      .update({ status: newStatus })
-      .eq('id', task.id);
+    
+    const updatedTask = {
+      ...task,
+      status: newStatus,
+      finishedTime: newStatus === "done" ? new Date().toISOString() : null,
+    };
 
-    if (!error) {
-      setAllTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: newStatus } : t));
+    const updatedTasks = allTasks.map((t) =>
+      t.id === task.id ? updatedTask : t
+    );
+    setAllTasks(updatedTasks);
+    
+    if (user) {
+      localStorage.setItem(`tasks_${user.id}`, JSON.stringify(updatedTasks));
     }
   };
 
-  // 7. Logic Bộ lọc và Sắp xếp (Chạy ở máy khách cho nhanh)
+  // FILTER + SEARCH + SORT
   const processedTasks = useMemo(() => {
-    if (!session) return [];
-    let result = [...allTasks]; // Copy mảng để tránh lỗi readonly
+    if (!user || !isSignedIn) return [];
 
-    // Lọc theo từ khóa tìm kiếm
+    let result = [...allTasks];
+
+    // 🔎 search
     if (searchQuery) {
-      result = result.filter(t => t.text.toLowerCase().includes(searchQuery.toLowerCase()));
+      result = result.filter((t) =>
+        t.text.toLowerCase().includes(searchQuery.toLowerCase())
+      );
     }
-    
-    // Lọc theo trạng thái
-    const now = new Date();
-    if (filterStatus === "pending") result = result.filter(t => t.status !== "done");
-    else if (filterStatus === "done") result = result.filter(t => t.status === "done");
-    else if (filterStatus === "overdue") result = result.filter(t => t.status !== "done" && new Date(t.deadline) < now);
 
-    // Sắp xếp
+    // 🎯 filter
+    const now = new Date();
+    if (filterStatus === "pending")
+      result = result.filter((t) => t.status !== "done");
+    else if (filterStatus === "done")
+      result = result.filter((t) => t.status === "done");
+    else if (filterStatus === "overdue")
+      result = result.filter(
+        (t) => t.status !== "done" && new Date(t.deadline) < now
+      );
+
+    // ↕ sort
     result.sort((a, b) => {
       switch (sortBy) {
-        case "deadline-asc": return new Date(a.deadline) - new Date(b.deadline);
-        case "deadline-desc": return new Date(b.deadline) - new Date(a.deadline);
-        case "name-asc": return a.text.localeCompare(b.text, "vi");
-        case "name-desc": return b.text.localeCompare(a.text, "vi");
-        default: return 0;
+        case "deadline-asc":
+          return new Date(a.deadline) - new Date(b.deadline);
+        case "deadline-desc":
+          return new Date(b.deadline) - new Date(a.deadline);
+        case "name-asc":
+          return a.text.localeCompare(b.text);
+        case "name-desc":
+          return b.text.localeCompare(a.text);
+        default:
+          return 0;
       }
     });
+
     return result;
-  }, [allTasks, session, searchQuery, filterStatus, sortBy]);
+  }, [allTasks, searchQuery, filterStatus, sortBy, user, isSignedIn]);
 
-
-  // --- PHẦN 2: GIAO DIỆN NGƯỜI DÙNG (MÀU TÍM) ---
-  
-  if (loading && !session) return <LoadingOverlay />;
-
-  // 1. Màn hình Đăng nhập (Login)
-  if (!session) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-[#c084fc] to-[#6b21a8]">
-        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
-          <h1 className="text-3xl font-bold text-center mb-6 text-purple-700">Đăng Nhập</h1>
-          <p className="text-center text-gray-500 mb-6">Quản lý công việc hiệu quả</p>
-          
-          {/* Form đăng nhập của Supabase */}
-          <Auth 
-            supabaseClient={supabase} 
-            appearance={{ 
-                theme: ThemeSupa,
-                variables: {
-                    default: {
-                        colors: {
-                            brand: '#7e22ce', // Màu tím chủ đạo
-                            brandAccent: '#6b21a8',
-                        }
-                    }
-                }
-            }}
-            // 👇 DANH SÁCH CÁC CỔNG ĐĂNG NHẬP (Thêm 'azure' vào đây nếu muốn dùng lại Microsoft)
-            providers={['google', 'facebook']} 
-            theme="default"
-          />
-        </div>
-      </div>
-    );
+  // ====================================================
+  // UI - LOADING
+  // ====================================================
+  if (!isLoaded || loading) {
+    return <LoadingOverlay />;
   }
 
-  // 2. Màn hình chính (Dashboard)
   return (
-    <div className="min-h-screen p-4 md:p-8 flex justify-center bg-gradient-to-br from-[#c084fc] to-[#6b21a8]">
-        <div className="w-full max-w-4xl">
-          
-          {/* Header */}
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 text-white">
-            <div>
-              <h1 className="text-4xl font-bold mb-2">Danh Sách Công Việc</h1>
-              <p className="text-purple-100 text-lg">
-                Xin chào, <span className="font-bold">{session.user.email}</span> 👋
-              </p>
+    <ClerkLoaded>
+      <>
+        <SignedOut>
+          <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-[#c084fc] to-[#6b21a8]">
+            <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md text-center">
+              <h1 className="text-3xl font-bold text-purple-700 mb-6">Đăng nhập để tiếp tục</h1>
+              <p className="text-gray-600 mb-6">Quản lý công việc hiệu quả với Task Manager</p>
+              <SignInButton mode="modal">
+                <button className="bg-purple-700 hover:bg-purple-800 text-white px-6 py-3 rounded-xl font-semibold w-full transition-colors">
+                  Đăng nhập với Clerk
+                </button>
+              </SignInButton>
+              <div className="mt-4">
+                <SignUpButton mode="modal">
+                  <button className="text-purple-600 hover:text-purple-800 font-medium">
+                    Chưa có tài khoản? Đăng ký ngay
+                  </button>
+                </SignUpButton>
+              </div>
             </div>
-            <button
-              onClick={() => supabase.auth.signOut()}
-              className="px-6 py-2.5 rounded-xl font-semibold text-white bg-purple-700 hover:bg-purple-800 transition-colors shadow-md border border-purple-500"
-            >
-              Đăng Xuất
-            </button>
           </div>
+        </SignedOut>
 
-          <div className="space-y-6">
-            {/* Form Thêm Công Việc */}
-            <div className="bg-white rounded-2xl shadow-xl p-6 md:p-8">
-              <AddTaskForm
-                addTask={addTask}
-                currentUser={session.user.id}
-                primaryColor="#7e22ce" 
-              />
-            </div>
-
-            {/* Khu vực Danh sách & Bộ lọc */}
-            <div className="bg-white rounded-2xl shadow-xl p-6 md:p-8">
-              
-              {/* Thanh công cụ: Tìm kiếm - Lọc - Sắp xếp */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                {/* Tìm kiếm */}
-                <div className="relative">
-                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
-                  <input 
-                    type="text" 
-                    placeholder="Tìm công việc..." 
-                    className="w-full px-4 py-3 pl-11 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none transition-shadow"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
+        <SignedIn>
+          <div className="min-h-screen p-4 md:p-8 flex justify-center bg-gradient-to-br from-[#c084fc] to-[#6b21a8]">
+            <div className="w-full max-w-4xl">
+              {/* HEADER */}
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 text-white">
+                <div>
+                  <h1 className="text-4xl font-bold mb-2">Danh Sách Công Việc</h1>
+                  <p className="text-purple-100 text-lg">
+                    Xin chào, <span className="font-bold">
+                      {displayName}
+                    </span> 👋
+                  </p>
                 </div>
-                
-                {/* Lọc trạng thái */}
-                <select 
-                  className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none appearance-none bg-white cursor-pointer"
-                  style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: `right 1rem center`, backgroundRepeat: `no-repeat`, backgroundSize: `1.5em 1.5em` }}
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                >
-                  <option value="all">📝 Tất cả trạng thái</option>
-                  <option value="pending">⏳ Đang thực hiện</option>
-                  <option value="done">✅ Đã hoàn thành</option>
-                  <option value="overdue">🚨 Đã quá hạn</option>
-                </select>
-
-                {/* Sắp xếp */}
-                <select 
-                  className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none appearance-none bg-white cursor-pointer"
-                  style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: `right 1rem center`, backgroundRepeat: `no-repeat`, backgroundSize: `1.5em 1.5em` }}
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value)}
-                >
-                  <option value="deadline-asc">📅 Hạn: Gần nhất trước</option>
-                  <option value="deadline-desc">📅 Hạn: Xa nhất trước</option>
-                  <option value="name-asc">🔤 Tên: A - Z</option>
-                  <option value="name-desc">🔤 Tên: Z - A</option>
-                </select>
+                <div className="flex items-center gap-4">
+                  <UserButton afterSignOutUrl="/" />
+                </div>
               </div>
 
-              <h3 className="text-gray-500 font-medium mb-4 ml-1">
-                 Danh sách công việc ({processedTasks.length})
-              </h3>
-              
-              <TaskList
-                allTasks={processedTasks} 
-                currentUser={session.user.id}
-                toggleTask={toggleTask}
-                editTask={setEditingTask}
-                deleteTask={deleteTask}
-              />
+              <div className="space-y-6">
+                {/* FORM THÊM TASK */}
+                <div className="bg-white rounded-2xl shadow-xl p-6 md:p-8">
+                  <AddTaskForm addTask={addTask} currentUser={user?.id} primaryColor="#7e22ce" />
+                </div>
+
+                {/* DANH SÁCH TASK */}
+                <div className="bg-white rounded-2xl shadow-xl p-6 md:p-8">
+                  {/* TOOLBAR */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <input
+                      type="text"
+                      placeholder="Tìm công việc..."
+                      className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+
+                    <select
+                      className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                      value={filterStatus}
+                      onChange={(e) => setFilterStatus(e.target.value)}
+                    >
+                      <option value="all">📝 Tất cả</option>
+                      <option value="pending">⏳ Chưa xong</option>
+                      <option value="done">✅ Hoàn thành</option>
+                      <option value="overdue">🚨 Trễ hạn</option>
+                    </select>
+
+                    <select
+                      className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                    >
+                      <option value="deadline-asc">📅 Gần nhất</option>
+                      <option value="deadline-desc">📅 Xa nhất</option>
+                      <option value="name-asc">🔤 A → Z</option>
+                      <option value="name-desc">🔤 Z → A</option>
+                    </select>
+                  </div>
+
+                  <TaskList
+                    allTasks={processedTasks}
+                    toggleTask={toggleTask}
+                    editTask={setEditingTask}
+                    deleteTask={deleteTask}
+                  />
+                </div>
+              </div>
+
+              {/* MODAL CHỈNH SỬA */}
+              {editingTask && (
+                <EditTaskModal
+                  task={editingTask}
+                  updateTask={updateTask}
+                  closeModal={() => setEditingTask(null)}
+                  primaryColor="#7e22ce"
+                />
+              )}
             </div>
           </div>
-
-          {/* Modal chỉnh sửa */}
-          {editingTask && (
-            <EditTaskModal
-              task={editingTask}
-              updateTask={updateTask}
-              closeModal={() => setEditingTask(null)}
-              primaryColor="#7e22ce"
-            />
-          )}
-        </div>
-    </div>
+        </SignedIn>
+      </>
+    </ClerkLoaded>
   );
 }
